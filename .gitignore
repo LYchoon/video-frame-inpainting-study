@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+outputs/
+weights/
+samples/
+.cache/
+.bootstrap/
+*.log
+*.mp4
+*.mkv
+*.mov
+*.safetensors
+*.pkl
+*.pt
+*.ckpt

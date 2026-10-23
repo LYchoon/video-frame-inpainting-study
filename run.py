@@ -1,0 +1,124 @@
+"""One command: remove frames, reconstruct them, and save outputs."""
+import argparse
+from contextlib import ExitStack
+from datetime import datetime
+import importlib.metadata
+import json
+from pathlib import Path
+import sys
+import tempfile
+import time
+
+import numpy as np
+
+from core import inference_size, output_frame, removal_mask, windows
+from video_io import decode_video, encode_video
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="影片抽幀與補幀：VACE / RIFE")
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--n", type=int, required=True)
+    parser.add_argument("--mode", choices=["gap", "every"], default="gap")
+    parser.add_argument("--model", choices=["vace", "rife"], default="vace")
+    parser.add_argument("--model-size", choices=["1.3b", "14b"], default="1.3b")
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max-side", type=int, default=512)
+    parser.add_argument("--window-size", type=int, default=33)
+    parser.add_argument("--steps", type=int, default=30)
+    parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
+    args = parser.parse_args(argv)
+    if not args.input.is_file():
+        parser.error("找不到輸入影片。")
+    try:
+        removal_mask(2, args.n, args.mode)
+        list(windows(2, args.window_size))
+        if args.max_side < 32 or args.steps < 1 or args.seed < 0:
+            raise ValueError("max-side 必須 >= 32；steps 必須 >= 1；seed 必須 >= 0。")
+        if args.model == "rife" and args.model_size != "1.3b":
+            raise ValueError("model-size 僅用於 VACE；RIFE 請省略此參數。")
+    except ValueError as error:
+        parser.error(str(error))
+    return args
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    import torch
+    torch.set_num_threads(min(8, torch.get_num_threads()))
+    device = torch.device(args.device)
+    if device.type not in ("cpu", "cuda"):
+        raise ValueError("device 請使用 cpu 或 cuda:N。")
+    if device.type == "cuda":
+        if not torch.cuda.is_available():
+            raise ValueError("找不到 CUDA GPU；請安裝 CUDA 版 PyTorch，或指定 --device cpu。")
+        device = torch.device("cuda", device.index if device.index is not None else 0)
+        if device.index >= torch.cuda.device_count():
+            raise ValueError(f"不存在的 GPU：{device}。")
+        args.device = str(device)
+        torch.cuda.set_device(device)
+        torch.cuda.reset_peak_memory_stats(device)
+    started = time.perf_counter()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    name = f"{args.input.stem}_{datetime.now():%Y%m%d_%H%M%S_%f}"
+    output = args.output_dir / name
+    output.mkdir(exist_ok=False)
+    record = {"status": "running", "parameters": {k: str(v) if isinstance(v, Path) else v
+               for k, v in vars(args).items()}, "versions": {p: importlib.metadata.version(p)
+               for p in ("torch", "diffusers", "transformers", "av")}}
+    try:
+        # Disk-backed frames avoid loading the whole source into RAM.
+        with tempfile.TemporaryDirectory(prefix="frames-", dir=output) as scratch, ExitStack() as cleanup:
+            frames, info = decode_video(args.input, scratch)
+            cleanup.callback(frames._mmap.close)
+            mask = removal_mask(len(frames), args.n, args.mode)
+            dimensions = inference_size(info["width"], info["height"], args.max_side)
+            record.update(source=info, removed_frame_indices_0based=np.flatnonzero(mask).tolist(),
+                          inference_dimensions=list(dimensions))
+            print(f"影片 {len(frames)} 幀；移除 {mask.sum()} 幀；推論尺寸 {dimensions}", flush=True)
+            sums = np.memmap(Path(scratch) / "generated.f32", mode="w+", dtype=np.float32,
+                             shape=(len(frames), dimensions[1], dimensions[0], 3))
+            cleanup.callback(sums._mmap.close)
+            sums[:] = 0
+            counts = np.zeros(len(frames), dtype=np.uint32)
+            if mask.any():
+                if args.model == "vace":
+                    from vace import reconstruct
+                else:
+                    from rife import reconstruct
+                record["model"] = reconstruct(frames, mask, sums, counts, dimensions, args)
+            if np.any(mask & (counts == 0)):
+                raise RuntimeError("部分缺失幀未被模型填補，已停止輸出。")
+            black = np.zeros_like(frames[0])
+            encode_video(output / "masked.mp4", (black if mask[i] else frames[i]
+                         for i in range(len(frames))), args.input.resolve(), info)
+
+            def restored_frames():
+                for i in range(len(frames)):
+                    prediction = None
+                    if mask[i]:
+                        prediction = np.rint(np.clip(sums[i] / counts[i], 0, 1) * 255).astype(np.uint8)
+                    yield output_frame(frames[i], mask[i], prediction)
+
+            encode_video(output / "restored.mp4", restored_frames(), args.input.resolve(), info)
+        record["status"] = "complete"
+        print(f"完成：{output.resolve()}", flush=True)
+    except BaseException as error:
+        record.update(status="failed", error=str(error))
+        if isinstance(error, torch.cuda.OutOfMemoryError):
+            print("顯存不足：請明確調低 --max-side 256 或 --window-size 17 後重試。", file=sys.stderr)
+        raise
+    finally:
+        record["elapsed_seconds"] = round(time.perf_counter() - started, 3)
+        if device.type == "cuda":
+            record["peak_gpu_memory_bytes"] = torch.cuda.max_memory_allocated(device)
+        (output / "run.json").write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, RuntimeError, OSError) as error:
+        print(f"錯誤：{error}", file=sys.stderr)
+        sys.exit(1)
