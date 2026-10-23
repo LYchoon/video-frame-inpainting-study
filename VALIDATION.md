@@ -26,4 +26,8 @@
 
 最終依賴：PyTorch 2.7.1+cu126、Diffusers 0.36.0、Transformers 4.56.2、PyAV 15.1.0；`pip check` 通過。VACE 模型 revision：`ec4d2cb062b548996b179d493fdd05340de702a1`。
 
+RTX 5090 的安裝配置另提供 PyTorch 2.7.1+cu128 / torchvision 0.22.1+cu128；其他依賴維持相同版本。此配置依官方 Blackwell 支援選定，尚未在 RTX 5090 執行模型驗證，以上耗時與記憶體數字不適用於 5090。
+
+整理為 `src/` 與 `outputs/` 後，重新通過 6 項自動測試、VACE 模組匯入及 RIFE 真實補幀；根目錄 `python run.py ...` 指令維持可用。安裝腳本以替身程式驗證預設 cu126、明確 cu126、明確 cu128 與錯誤參數拒絕，未在 2080 主機實際安裝 cu128。
+
 耗時包含程式內解碼、模型載入與編碼，首次下載、磁碟快取與 CPU offload 會影響速度；PyTorch peak allocated 不等於整張顯卡的總占用。本驗收確認程式能執行與輸出，不代表補幀自然度的研究結論。

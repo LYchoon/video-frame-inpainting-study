@@ -12,7 +12,7 @@ from PIL import Image
 import torch
 import torch.nn.functional as F
 
-from core import add_prediction
+from .core import add_prediction
 
 RIFE_REVISION = "5d8adbdd40e12c2c8f91930eff838aebe561c086"
 RIFE_WEIGHT_ID = "147XVsDXBfJPlyct2jfo9kpbL944mNeZr"

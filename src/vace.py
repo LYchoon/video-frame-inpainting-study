@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from core import add_prediction, condition_window, windows
+from .core import add_prediction, condition_window, windows
 
 
 def reconstruct(frames, mask, sums, counts, dimensions, args):

@@ -10,10 +10,10 @@ import av
 import imageio_ffmpeg
 import numpy as np
 
-from core import (add_prediction, condition_window, inference_size,
+from src.core import (add_prediction, condition_window, inference_size,
                   output_frame, removal_mask, windows)
-from run import main, parse_args
-from video_io import decode_video, encode_video
+from src.cli import main, parse_args
+from src.video_io import decode_video, encode_video
 
 
 class FrameChecks(unittest.TestCase):

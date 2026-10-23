@@ -2,22 +2,75 @@
 
 輸入影片、抽幀數 `n` 與模型，一行指令完成抽幀及填補，結果存進 `outputs/`。支援 **Wan2.1 VACE 1.3B／14B** 與 **RIFE_m**；不需要訓練。
 
+## 專案架構
+
+```text
+video-frame-inpainting-study/
+  src/
+    cli.py          # 參數與抽幀／補幀流程
+    core.py         # 抽幀規則、遮罩、視窗與影格合成
+    video_io.py     # 影片讀取、FPS 檢查與音訊輸出
+    vace.py         # VACE 1.3B／14B 推論
+    rife.py         # RIFE_m 推論
+    __init__.py
+  outputs/          # 執行結果；Git 只保留空目錄標記
+  run.py            # 一行指令入口
+  setup.sh          # 環境安裝（cu126／cu128）
+  requirements.txt
+  test_run.py
+  README.md
+  VALIDATION.md
+```
+
+請在專案根目錄執行 `python run.py ...`，主要實作集中於 `src/`。
+
 ## 一次安裝
 
-建議 Linux、Python 3.10–3.12、NVIDIA GPU。以下已針對 `ssh 2080` 的 RTX 2080 Ti 準備；8 張 GPU 各自只有 11 GB，程式每次使用指定的一張卡。
+建議 Linux、Python **3.12**（支援 3.10–3.12）、NVIDIA GPU。依工作站顯卡選擇安裝版本；程式每次使用指定的一張卡。
+
+| 工作站 | PyTorch / torchvision | CUDA wheel | 安裝指令 |
+| --- | --- | --- | --- |
+| RTX 5090 | 2.7.1 / 0.22.1 | **cu128（CUDA 12.8）** | `bash setup.sh cu128` |
+| `ssh 2080`：RTX 2080 Ti | 2.7.1 / 0.22.1 | cu126（CUDA 12.6） | `bash setup.sh cu126` |
+
+**RTX 5090 安裝指令：**
 
 ```bash
 git clone git@github.com:LYchoon/video-frame-inpainting-study.git
 cd video-frame-inpainting-study
-bash setup.sh
+bash setup.sh cu128
 source .venv/bin/activate
 ```
 
-需要先有存取此 private repo 的 GitHub 權限，系統需安裝 Python 及 Git。`setup.sh` 會建立 `.venv`、安裝 CUDA 12.6 版 PyTorch 與依賴；需要相容的 NVIDIA driver。FFmpeg 由 Python 套件提供，不必另外安裝。缺少 `python3-venv` 時，安裝腳本改用專案內的 virtualenv bootstrap，不修改其他專案環境。
+RTX 5090 屬於 Blackwell 架構，請使用 cu128；[PyTorch 2.7 加入 Blackwell 與 CUDA 12.8 支援](https://pytorch.org/blog/pytorch-2-7/)。版本對應依照 [PyTorch 官方安裝指令](https://pytorch.org/get-started/previous-versions/#v271)。腳本中實際安裝的版本為：
+
+```bash
+python -m pip install torch==2.7.1+cu128 torchvision==0.22.1+cu128 --index-url https://download.pytorch.org/whl/cu128
+```
+
+若原本已安裝 cu126，在專案目錄執行 `bash setup.sh cu128` 即可切換；腳本會明確指定 `+cu128`，避免已安裝的同版 cu126 被視為滿足需求。RTX 2080 Ti 則使用 `bash setup.sh cu126`；省略參數仍預設 cu126，保留原本行為。
+
+需要先有存取此 private repo 的 GitHub 權限，系統需安裝 Python 及 Git。`setup.sh` 會建立 `.venv`，只安裝選定的 PyTorch 與依賴。RTX 5090 的 Linux 驅動建議使用 **570.124.06 或更新、支援該顯卡的版本**，參考 [NVIDIA CUDA 12.8 Update 1 發行說明](https://docs.nvidia.com/cuda/archive/12.8.1/cuda-toolkit-release-notes/)；PyTorch wheel 已附 CUDA 執行所需套件，不必另裝系統 CUDA Toolkit。FFmpeg 由 Python 套件提供，不必另外安裝。缺少 `python3-venv` 時，安裝腳本改用專案內的 virtualenv bootstrap，不修改其他專案環境。
+
+5090 安裝完成後，可確認版本並實際執行一次 GPU 運算：
+
+```bash
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0)); x=torch.randn(32,32,device='cuda'); print('GPU OK:', (x@x).mean().item())"
+```
+
+預期顯示 `2.7.1+cu128`、`12.8`、RTX 5090，並成功印出 `GPU OK`。**5090 尚未實測**；現有實測紀錄來自 RTX 2080 Ti。
 
 首次執行時會從 Hugging Face／官方 Google Drive 下載模型，RIFE 原始碼從官方 GitHub 下載。請預留數十 GB 磁碟空間與足夠主記憶體；VACE 的 XXL 文字編碼器在 CPU 執行。後續使用本機快取，請保留快取目錄。
 
 ## 使用
+
+RTX 5090 建議先用 **VACE 1.3B**、512 最長邊、33 幀視窗、30 steps，與既有測試設定相同；程式會自動使用 BF16。先確認這個指令可跑通：
+
+```bash
+python run.py --input video.mp4 --n 3 --model vace --model-size 1.3b --max-side 512 --window-size 33 --steps 30
+```
+
+14B 的單卡顯存需求仍需實測，不保證 RTX 5090 的顯存足以執行目前的 CPU offload 配置。
 
 ```bash
 # 預設：VACE 1.3B；保留 1 幀、連續移除 3 幀
