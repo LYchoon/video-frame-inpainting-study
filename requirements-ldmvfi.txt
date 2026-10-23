@@ -1,0 +1,15 @@
+# Separate Python 3.9 environment: do not merge with requirements.txt.
+numpy==1.23.5
+Pillow==9.5.0
+pytorch-lightning==1.7.7
+torchmetrics==0.9.3
+omegaconf==2.2.3
+einops==0.5.0
+timm==0.6.12
+cupy-cuda11x==11.6.0
+tensorboard==2.11.2
+protobuf==3.20.3
+av==12.3.0
+imageio-ffmpeg==0.6.0
+gdown==5.2.0
+six==1.16.0

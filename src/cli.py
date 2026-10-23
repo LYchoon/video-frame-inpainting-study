@@ -16,28 +16,40 @@ from .video_io import decode_video, encode_video
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="影片抽幀與補幀：VACE / RIFE")
+    parser = argparse.ArgumentParser(description="影片抽幀與補幀：LDMVFI / RIFE / VACE")
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--n", type=int, required=True)
+    parser.add_argument("--m", type=int, help="每 m 幀移除最後連續 n 幀；m > n，預設 n+1")
     parser.add_argument("--mode", choices=["gap", "every"], default="gap")
-    parser.add_argument("--model", choices=["vace", "rife"], default="vace")
+    parser.add_argument("--model", choices=["ldmvfi", "rife", "vace"], default="ldmvfi")
     parser.add_argument("--model-size", choices=["1.3b", "14b"], default="1.3b")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max-side", type=int, default=512)
+    parser.add_argument("--max-side", type=int)
     parser.add_argument("--window-size", type=int, default=33)
-    parser.add_argument("--steps", type=int, default=30)
+    parser.add_argument("--steps", type=int)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
     args = parser.parse_args(argv)
+    if args.max_side is None:
+        args.max_side = 384 if args.model == "ldmvfi" else 512
+    if args.steps is None:
+        args.steps = 200 if args.model == "ldmvfi" else 30
     if not args.input.is_file():
         parser.error("找不到輸入影片。")
     try:
-        removal_mask(2, args.n, args.mode)
+        removal_mask(2, args.n, args.mode, args.m)
+        if args.mode == "gap" and args.m is None:
+            args.m = args.n + 1
         list(windows(2, args.window_size))
         if args.max_side < 32 or args.steps < 1 or args.seed < 0:
             raise ValueError("max-side 必須 >= 32；steps 必須 >= 1；seed 必須 >= 0。")
-        if args.model == "rife" and args.model_size != "1.3b":
-            raise ValueError("model-size 僅用於 VACE；RIFE 請省略此參數。")
+        if args.model != "vace" and args.model_size != "1.3b":
+            raise ValueError("model-size 僅用於 VACE；其他模型請省略此參數。")
+        if args.model == "ldmvfi":
+            if args.mode == "gap" and args.n != 1:
+                raise ValueError("LDMVFI 目前支援單幀缺口：gap 請用 --n 1，或使用 every 模式；連續多幀請選 RIFE / VACE。")
+            if args.steps > 500 or 1000 % args.steps:
+                raise ValueError("LDMVFI steps 必須整除 1000 且 <= 500，例如 50、100、200。")
     except ValueError as error:
         parser.error(str(error))
     return args
@@ -64,15 +76,25 @@ def main(argv=None):
     name = f"{args.input.stem}_{datetime.now():%Y%m%d_%H%M%S_%f}"
     output = args.output_dir / name
     output.mkdir(exist_ok=False)
+    packages = ["torch", "torchvision", "numpy", "av", "Pillow", "imageio-ffmpeg"]
+    if args.model == "ldmvfi":
+        packages += ["pytorch-lightning", "cupy-cuda11x", "timm", "omegaconf"]
+    elif args.model == "vace":
+        packages += ["diffusers", "transformers", "accelerate"]
+    versions = {}
+    for package in packages:
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            pass  # A no-op run needs no model-specific dependencies.
     record = {"status": "running", "parameters": {k: str(v) if isinstance(v, Path) else v
-               for k, v in vars(args).items()}, "versions": {p: importlib.metadata.version(p)
-               for p in ("torch", "diffusers", "transformers", "av")}}
+               for k, v in vars(args).items()}, "versions": versions}
     try:
         # Disk-backed frames avoid loading the whole source into RAM.
         with tempfile.TemporaryDirectory(prefix="frames-", dir=output) as scratch, ExitStack() as cleanup:
             frames, info = decode_video(args.input, scratch)
             cleanup.callback(frames._mmap.close)
-            mask = removal_mask(len(frames), args.n, args.mode)
+            mask = removal_mask(len(frames), args.n, args.mode, args.m)
             dimensions = inference_size(info["width"], info["height"], args.max_side)
             record.update(source=info, removed_frame_indices_0based=np.flatnonzero(mask).tolist(),
                           inference_dimensions=list(dimensions))
@@ -85,6 +107,8 @@ def main(argv=None):
             if mask.any():
                 if args.model == "vace":
                     from .vace import reconstruct
+                elif args.model == "ldmvfi":
+                    from .ldmvfi import reconstruct
                 else:
                     from .rife import reconstruct
                 record["model"] = reconstruct(frames, mask, sums, counts, dimensions, args)
@@ -106,8 +130,8 @@ def main(argv=None):
         print(f"完成：{output.resolve()}", flush=True)
     except BaseException as error:
         record.update(status="failed", error=str(error))
-        if isinstance(error, torch.cuda.OutOfMemoryError):
-            print("顯存不足：請明確調低 --max-side 256 或 --window-size 17 後重試。", file=sys.stderr)
+        if isinstance(error, RuntimeError) and "out of memory" in str(error).lower():
+            print("顯存不足：請明確調低 --max-side 256 後重試；VACE 也可調低 --window-size 17。", file=sys.stderr)
         raise
     finally:
         record["elapsed_seconds"] = round(time.perf_counter() - started, 3)

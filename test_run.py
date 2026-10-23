@@ -13,6 +13,7 @@ import numpy as np
 from src.core import (add_prediction, condition_window, inference_size,
                   output_frame, removal_mask, windows)
 from src.cli import main, parse_args
+from src.ldmvfi import midpoint_conditions
 from src.video_io import decode_video, encode_video
 
 
@@ -20,6 +21,14 @@ class FrameChecks(unittest.TestCase):
     def test_patterns(self):
         self.assertEqual(np.flatnonzero(removal_mask(10, 3, "gap")).tolist(), [1, 2, 3, 5, 6, 7])
         self.assertEqual(np.flatnonzero(removal_mask(10, 3, "every")).tolist(), [2, 5, 8])
+        self.assertEqual(np.flatnonzero(removal_mask(12, 2, m=5)).tolist(), [3, 4, 8, 9])
+        self.assertEqual(np.flatnonzero(removal_mask(12, 1, m=4)).tolist(), [3, 7])
+        np.testing.assert_array_equal(removal_mask(20, 3), removal_mask(20, 3, m=4))
+        for m in (-1, 0, 1, 2):
+            with self.assertRaises(ValueError):
+                removal_mask(12, 2, m=m)
+        with self.assertRaises(ValueError):
+            removal_mask(12, 3, "every", m=4)
         for mode in ("gap", "every"):
             for count in (2, 3, 4, 10, 41):
                 mask = removal_mask(count, 2, mode)
@@ -61,9 +70,34 @@ class FrameChecks(unittest.TestCase):
         with tempfile.NamedTemporaryFile() as source:
             for arguments in (("--n", "0"), ("--n", "1", "--mode", "every"),
                               ("--n", "3", "--window-size", "32"),
-                              ("--n", "3", "--model", "rife", "--model-size", "14b")):
+                              ("--n", "3", "--model", "rife", "--model-size", "14b"),
+                              ("--n", "3", "--model", "ldmvfi"),
+                              ("--n", "1", "--model", "ldmvfi", "--steps", "30"),
+                              ("--n", "2", "--m", "2", "--model", "rife")):
                 with self.assertRaises(SystemExit):
                     parse_args(["--input", source.name, *arguments])
+
+    def test_ldmvfi_defaults_and_no_ground_truth_leak(self):
+        with tempfile.NamedTemporaryFile() as source:
+            args = parse_args(["--input", source.name, "--n", "1"])
+            self.assertEqual((args.model, args.steps, args.max_side, args.m), ("ldmvfi", 200, 384, 2))
+            args = parse_args(["--input", source.name, "--n", "1", "--m", "5"])
+            self.assertEqual(args.m, 5)
+            args = parse_args(["--input", source.name, "--n", "3", "--model", "vace"])
+            self.assertEqual((args.steps, args.max_side), (30, 512))
+            parse_args(["--input", source.name, "--n", "3", "--mode", "every"])
+        frames = np.zeros((5, 64, 32, 3), np.uint8)
+        frames[0], frames[2], frames[4] = 23, 78, 211
+        mask = removal_mask(5, 1, "gap")
+        first = midpoint_conditions(frames, mask, 1, (32, 64))
+        frames[mask] = 255
+        second = midpoint_conditions(frames, mask, 1, (32, 64))
+        for name, value in (("prev_frame", 23), ("next_frame", 78)):
+            self.assertEqual(first[name].shape, (256, 256, 3))
+            self.assertTrue((first[name] == value).all())
+            np.testing.assert_array_equal(first[name], second[name])
+        with self.assertRaises(ValueError):
+            midpoint_conditions(frames, removal_mask(5, 3, "gap"), 1, (32, 64))
 
 
 class VideoChecks(unittest.TestCase):
@@ -92,7 +126,7 @@ class VideoChecks(unittest.TestCase):
             two = root / "two.mp4"
             subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-loglevel", "error", "-i", str(source),
                             "-frames:v", "2", "-an", str(two)], check=True)
-            main(["--input", str(two), "--n", "3", "--device", "cpu", "--output-dir", str(root / "out")])
+            main(["--input", str(two), "--n", "1", "--device", "cpu", "--output-dir", str(root / "out")])
             result = next((root / "out").iterdir())
             self.assertEqual(json.loads((result / "run.json").read_text())["status"], "complete")
             self.assertTrue((result / "restored.mp4").is_file())

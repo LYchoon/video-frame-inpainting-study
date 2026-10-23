@@ -3,13 +3,18 @@ import numpy as np
 from PIL import Image
 
 
-def removal_mask(count, n, mode):
+def removal_mask(count, n, mode="gap", m=None):
     if n < 1 or (mode == "every" and n < 2):
         raise ValueError("gap 的 n 必須 >= 1；every 的 n 必須 >= 2。")
     index = np.arange(count)
     if mode == "gap":
-        mask = index % (n + 1) != 0
+        period = n + 1 if m is None else m
+        if period <= n:
+            raise ValueError("m 必須 > n：每 m 幀保留前 m-n 幀、移除最後 n 幀。")
+        mask = index % period >= period - n
     elif mode == "every":
+        if m is not None:
+            raise ValueError("--m 請搭配預設模式，不要同時指定 --mode every。")
         mask = (index + 1) % n == 0  # human-facing positions start at 1
     else:
         raise ValueError("未知抽幀模式。")

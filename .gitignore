@@ -1,4 +1,6 @@
 .venv/
+.venv-ldmvfi/
+.cache-ldmvfi/
 __pycache__/
 *.pyc
 outputs/*
